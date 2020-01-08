@@ -39,6 +39,7 @@ class rainmachine(sofabase):
             #self.log.info('Token data: %s' % self.tokendata)
             await self.get_api('dailystats')
             await self.get_zones()
+            self.log.info('%s' % json.dumps(await self.get_api('/mixer/2020-01-06')))
             self.log.info('%s' % await self.get_api('/watering/zone'))
             
         async def get_zones(self):
