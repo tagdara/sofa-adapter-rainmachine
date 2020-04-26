@@ -15,18 +15,22 @@ import random
 import json
 import asyncio
 import aiohttp
-
+import datetime
 
 class rainmachine(sofabase):
     
     class adapterProcess(adapterbase):
+        
+        conditions=[    "MostlyCloudy", "Fair", "FewClouds", "PartlyCloudy", "Overcast", "Fog", "Smoke", "FreezingRain", "IcePellets",
+                "RainIce", "RainSnow", "RainShowers", "Thunderstorm", "Snow", "Windy", "ShowersInVicinity", "HeavyFreezingRain",
+                "ThunderstormInVicinity", "LightRain", "HeavyRain", "FunnelCloud", "Dust", "Haze", "Hot", "Cold", "Unknown" ]
     
         def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, **kwargs):
             self.dataset=dataset
-            self.dataset.nativeDevices['target']={}
+            self.dataset.nativeDevices['zones']=[]
             self.log=log
             self.notify=notify
-            self.polltime=5
+            self.polltime=900  # 15 minutes is probably too often
 
             if not loop:
                 self.loop = asyncio.new_event_loop()
@@ -39,12 +43,42 @@ class rainmachine(sofabase):
             #self.log.info('Token data: %s' % self.tokendata)
             await self.get_api('dailystats')
             await self.get_zones()
-            self.log.info('%s' % json.dumps(await self.get_api('/mixer/2020-01-06')))
-            self.log.info('%s' % await self.get_api('/watering/zone'))
+            await self.pollRainMachine()
+        
+        async def pollRainMachine(self):
+            while True:
+                try:
+                    await self.update_data()
+                except:
+                    self.log.error('Error fetching Rain Machine Data', exc_info=True)
+                
+                await asyncio.sleep(self.polltime)
+                
+        async def update_data(self):
+            try:
+                response=await self.get_api('/mixer/%s' % datetime.datetime.now().strftime("%Y-%m-%d"))
+                await self.dataset.ingest({ "weather" : await self.parse_mixer(response)})
+
+            except:
+                self.log.error('!! Error getting updated data from rain machine', exc_info=True)
+            
+        async def parse_mixer(self, data):
+            try:
+                weatherdata=data['mixerDataByDate'][0]
+                weatherdata['conditionName']=self.conditions[int(weatherdata['condition'])]
+                for item in weatherdata:
+                    if item in ['temperature','minTemp','maxTemp']:
+                        weatherdata[item]=(int(weatherdata[item]) * 9/5) + 32
+                #await self.dataset.ingest({ "weather" : weatherdata })
+                return weatherdata
+            except:
+                self.log.error('!! error ingesting weather data', exc_info=True)
+                return {}
             
         async def get_zones(self):
             try:
                 zonedata=await self.get_api('zone')
+                await self.dataset.ingest(zonedata)
                 for zone in zonedata['zones']:
                     if zone['active']:
                         self.log.info('Zone: %s %s' % (zone['name'],zone))
@@ -72,7 +106,7 @@ class rainmachine(sofabase):
             
             try:
                 url="https://%s:%s/api/4/%s?access_token=%s" % (self.dataset.config['device_address'], self.dataset.config['device_port'], api_command, self.access_token)
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False)) as client:
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as client:
                     async with client.get(url) as response:
                         status=response.status
                         result=await response.text()
@@ -91,7 +125,7 @@ class rainmachine(sofabase):
 
 
         # Adapter Overlays that will be called from dataset
-        def addSmartDevice(self, path):
+        async def addSmartDevice(self, path):
             
             try:
                 if path.split("/")[1]=="target":
