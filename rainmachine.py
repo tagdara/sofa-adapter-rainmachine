@@ -5,10 +5,8 @@ import sys, os
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__),'../../base'))
 
-from sofabase import sofabase
-from sofabase import adapterbase
+from sofabase import sofabase, adapterbase, configbase
 import devices
-
 
 import math
 import random
@@ -18,14 +16,26 @@ import aiohttp
 import datetime
 
 class rainmachine(sofabase):
+
+    class adapter_config(configbase):
     
+        def adapter_fields(self):
+            self.power_strips=self.set_or_default('power_strips', default=[])
+            self.device_password=self.set_or_default('device_password', mandatory=True)
+            self.device_address=self.set_or_default('device_address', mandatory=True)
+            self.device_port=self.set_or_default('device_port', default=8080)
+            self.device_api=self.set_or_default('device_api', default={"version": { "command": "get", "url": "/api/apiVer"}, "getToken": { "command": "post","url": "/api/4/auth/login"}}) 
+            
+            
+            
     class adapterProcess(adapterbase):
         
         conditions=[    "MostlyCloudy", "Fair", "FewClouds", "PartlyCloudy", "Overcast", "Fog", "Smoke", "FreezingRain", "IcePellets",
                 "RainIce", "RainSnow", "RainShowers", "Thunderstorm", "Snow", "Windy", "ShowersInVicinity", "HeavyFreezingRain",
                 "ThunderstormInVicinity", "LightRain", "HeavyRain", "FunnelCloud", "Dust", "Haze", "Hot", "Cold", "Unknown" ]
     
-        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, **kwargs):
+        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, config=None, **kwargs):
+            self.config=config
             self.dataset=dataset
             self.dataset.nativeDevices['zones']=[]
             self.log=log
@@ -87,10 +97,9 @@ class rainmachine(sofabase):
             
         async def get_auth_token(self):
             try:
-                data=json.dumps({"pwd": self.dataset.config['password']})
-                url="https://%s:%s/api/4/auth/login" % (self.dataset.config['device_address'], self.dataset.config['device_port'])
+                data=json.dumps({"pwd": self.config.device_password})
+                url="https://%s:%s/api/4/auth/login" % (self.config.device_address, self.config.device_port)
                 headers={}
-                self.log.info('URL: %s %s'  % (url, data))
                 #headers = { "Content-type": "text/xml" }
                 async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False)) as client:
                     response=await client.post(url, data=data, headers=headers)
@@ -105,7 +114,7 @@ class rainmachine(sofabase):
         async def get_api(self, api_command):
             
             try:
-                url="https://%s:%s/api/4/%s?access_token=%s" % (self.dataset.config['device_address'], self.dataset.config['device_port'], api_command, self.access_token)
+                url="https://%s:%s/api/4/%s?access_token=%s" % (self.config.device_address, self.config.device_port, api_command, self.access_token)
                 async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as client:
                     async with client.get(url) as response:
                         status=response.status
