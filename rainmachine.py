@@ -20,40 +20,62 @@ class rainmachine(sofabase):
     class adapter_config(configbase):
     
         def adapter_fields(self):
-            self.power_strips=self.set_or_default('power_strips', default=[])
             self.device_password=self.set_or_default('device_password', mandatory=True)
             self.device_address=self.set_or_default('device_address', mandatory=True)
             self.device_port=self.set_or_default('device_port', default=8080)
             self.device_api=self.set_or_default('device_api', default={"version": { "command": "get", "url": "/api/apiVer"}, "getToken": { "command": "post","url": "/api/4/auth/login"}}) 
+
+
+    class EndpointHealth(devices.EndpointHealth):
+
+        @property            
+        def connectivity(self):
+            #stubbed out but should reflect whether the panel is connected or not
+            return 'OK'
             
+            
+    class TemperatureSensor(devices.TemperatureSensor):
+        
+        @property            
+        def temperature(self):
+            try:
+                return round(self.nativeObject['weather']['temperature'])
+            except:
+                self.log.error('!! error getting weather temperature: %s' % self.nativeObject.keys(), exc_info=True)
+            return 0
             
             
     class adapterProcess(adapterbase):
         
         conditions=[    "MostlyCloudy", "Fair", "FewClouds", "PartlyCloudy", "Overcast", "Fog", "Smoke", "FreezingRain", "IcePellets",
-                "RainIce", "RainSnow", "RainShowers", "Thunderstorm", "Snow", "Windy", "ShowersInVicinity", "HeavyFreezingRain",
-                "ThunderstormInVicinity", "LightRain", "HeavyRain", "FunnelCloud", "Dust", "Haze", "Hot", "Cold", "Unknown" ]
+                        "RainIce", "RainSnow", "RainShowers", "Thunderstorm", "Snow", "Windy", "ShowersInVicinity", "HeavyFreezingRain",
+                        "ThunderstormInVicinity", "LightRain", "HeavyRain", "FunnelCloud", "Dust", "Haze", "Hot", "Cold", "Unknown" ]
     
         def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, config=None, **kwargs):
             self.config=config
             self.dataset=dataset
             self.dataset.nativeDevices['zones']=[]
+            self.dataset.nativeDevices['machines']=[]
             self.log=log
             self.notify=notify
-            self.polltime=900  # 15 minutes is probably too often
+            self.polltime=30  
 
             if not loop:
                 self.loop = asyncio.new_event_loop()
             else:
                 self.loop=loop
             
-        async def start(self):
+        async def pre_activate(self):
             self.log.info('.. Starting rainmachine')
             self.access_token=await self.get_auth_token()
             #self.log.info('Token data: %s' % self.tokendata)
+            await self.update_provision()
             await self.get_api('dailystats')
             await self.get_zones()
-            await self.pollRainMachine()
+            asyncio.create_task(self.pollRainMachine())
+            
+        async def start(self):
+            self.log.info('.. Starting rainmachine main process')            
         
         async def pollRainMachine(self):
             while True:
@@ -63,11 +85,20 @@ class rainmachine(sofabase):
                     self.log.error('Error fetching Rain Machine Data', exc_info=True)
                 
                 await asyncio.sleep(self.polltime)
+
+        async def update_provision(self):
+            try:
+                response=await self.get_api('/provision')
+                self.device_name=response['system']['netName']
+                await self.dataset.ingest( { "machines": { self.device_name: { "name": self.device_name, "provision": response }}} )
+            except:
+                self.log.error('!! Error getting updated lcoation data from rain machine', exc_info=True)
+
                 
         async def update_data(self):
             try:
                 response=await self.get_api('/mixer/%s' % datetime.datetime.now().strftime("%Y-%m-%d"))
-                await self.dataset.ingest({ "weather" : await self.parse_mixer(response)})
+                await self.dataset.ingest({ "machines": { self.device_name: { "weather" : await self.parse_mixer(response) }}} )
 
             except:
                 self.log.error('!! Error getting updated data from rain machine', exc_info=True)
@@ -82,7 +113,7 @@ class rainmachine(sofabase):
                 #await self.dataset.ingest({ "weather" : weatherdata })
                 return weatherdata
             except:
-                self.log.error('!! error ingesting weather data', exc_info=True)
+                self.log.error('!! error ingesting weather data: %s' % data, exc_info=True)
                 return {}
             
         async def get_zones(self):
@@ -91,6 +122,7 @@ class rainmachine(sofabase):
                 await self.dataset.ingest(zonedata)
                 for zone in zonedata['zones']:
                     if zone['active']:
+                        await self.dataset.ingest({ "machines": { self.device_name: { "zones": { "zone-%s" % str(zone['uid']) : zone }}}})
                         self.log.info('Zone: %s %s' % (zone['name'],zone))
             except:
                 self.log.error('Error getting zones', exc_info=True)            
@@ -101,7 +133,7 @@ class rainmachine(sofabase):
                 url="https://%s:%s/api/4/auth/login" % (self.config.device_address, self.config.device_port)
                 headers={}
                 #headers = { "Content-type": "text/xml" }
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False)) as client:
+                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as client:
                     response=await client.post(url, data=data, headers=headers)
                     result=await response.read()
                     result=json.loads(result.decode())
@@ -137,22 +169,30 @@ class rainmachine(sofabase):
         async def addSmartDevice(self, path):
             
             try:
-                if path.split("/")[1]=="target":
-                    return self.addSmartPost(path.split("/")[2])
-
+                device_id=path.split("/")[2]
+                device_type=path.split("/")[1]
+                endpointId="%s:%s:%s" % ("rainmachine", device_type, device_id)
+                if endpointId not in self.dataset.localDevices:  # localDevices/friendlyNam                
+                    if device_type=="machines":
+                        nativeObject=self.dataset.nativeDevices[device_type][device_id]
+                        return await self.add_machine(device_id, nativeObject)
             except:
                 self.log.error('Error defining smart device', exc_info=True)
                 return False
 
 
-        async def addSmartPost(self, deviceid):
-            
-            nativeObject=self.dataset.nativeDevices['target'][deviceid]
-            if nativeObject['name'] not in self.dataset.localDevices:
-                return self.dataset.addDevice(nativeObject['name'], devices.basicDevice('post/target/%s' % deviceid, nativeObject['name'], native=nativeObject))
-            
+        async def add_machine(self, deviceid, nativeObject):
+            try:
+                if 'weather' in nativeObject:  # shim right now to wait for first weather update
+                    self.log.info('~~ Adding %s %s' % (deviceid, nativeObject))
+                    device=devices.alexaDevice('rainmachine/machines/%s' % deviceid, "Outdoor Temperature", displayCategories=['TEMPERATURE_SENSOR'], adapter=self)
+                    device.TemperatureSensor=rainmachine.TemperatureSensor(device=device)
+                    device.EndpointHealth=rainmachine.EndpointHealth(device=device)
+                    return self.dataset.add_device(device)
+            except:
+                self.log.error('!! Error defining smart device', exc_info=True)
             return False
-
+                
 
         async def executePost(self, target, command, data=""):
             
